@@ -1,5 +1,5 @@
 import copy
-from typing import List, Tuple
+from typing import List, Tuple, Union
 
 import numpy as np
 from matplotlib import pyplot as plt
@@ -72,6 +72,17 @@ class QuickHull3D:
             self._points = np.delete(self._points, index, 0)
         self._hull_planes = [(2, 1, 0), (0, 1, 2)]
 
+    def remove_plane(self, plane: Union[tuple, int]):
+        if type(plane) is int:
+            plane = self._hull_planes.pop(plane)
+        elif type(plane) is tuple:
+            self._hull_planes.remove(plane)
+        else:
+            raise TypeError(f"illegal type for plane: {type(plane)} "
+                            f"plane must be passed as either an integer (index) or tuple (plane).")
+        neighbors = self._plane_neighbors.pop(plane)
+        return plane, neighbors
+
     def find_hull(self, initial_shape: str):
         if initial_shape == 'triangle':
             self.initial_triangle()
@@ -91,16 +102,21 @@ class QuickHull3D:
                     new_planes = [(plane[0], plane[1], new_hull_pt_idx),
                                   (plane[1], plane[2], new_hull_pt_idx),
                                   (plane[2], plane[0], new_hull_pt_idx)]
-                    for new_plane in new_planes:
-                        self._plane_neighbors[new_plane] = \
-                            self.find_plane_neighbors(new_plane, new_planes + self._plane_neighbors[plane])
+
+                    new_planes_neighbors = {new_planes[0]: (self._plane_neighbors[plane][0], new_planes[1], new_planes[2]),
+                                            new_planes[1]: (self._plane_neighbors[plane][1], new_planes[2], new_planes[0]),
+                                            new_planes[2]: (self._plane_neighbors[plane][2], new_planes[0], new_planes[1])}
 
                     self.delete_internal_points(new_planes + [self.flip_triangle(plane)])
-
-                    self._hull_planes.pop(i)
-                    new_planes = self.re_edge_adjacent_faces(plane, new_planes, new_hull_pt_idx)
-
                     self._hull_planes += new_planes
+                    for n_idx, neighbor in enumerate(self._plane_neighbors[plane]):
+                        for in_idx, inner_neighbor in enumerate(self._plane_neighbors[neighbor]):
+                            if inner_neighbor == plane:
+                                self._plane_neighbors[neighbor][in_idx] = new_planes[n_idx]
+                    self._plane_neighbors.update(new_planes_neighbors)
+
+                    plane, neighbors = self.remove_plane(i)
+                    self.re_edge_adjacent_faces(plane, neighbors, new_planes, new_hull_pt_idx)
 
                     self.plot_hull()
                     new_planes_found = True
@@ -157,15 +173,16 @@ class QuickHull3D:
                         adjacent_planes[plane] = 1
         return [plane for plane, shared_points in adjacent_planes.items() if shared_points == 2]
 
-    def re_edge_adjacent_faces(self, plane: tuple, new_planes: List[tuple], new_hull_pt_idx: int):
+    def re_edge_adjacent_faces(self, plane: tuple, plane_neighbors: List[tuple], new_planes: List[tuple], new_hull_pt_idx: int):
         """ recursive function that re-edges all faces that are adjacent to a certain face and are below a given point """
-        for adj_plane in self.find_adjacent_planes(plane):
+        for adj_plane in plane_neighbors:
             if not self.is_above_plane(adj_plane, self._hull_vertices[-1, :]):
                 continue
             print(f'plane of origin:{plane},   {new_hull_pt_idx} is above {adj_plane}')
-            for idx, tr_point in enumerate(adj_plane):
-                if tr_point not in plane:
-                    outer_point, outer_point_idx = tr_point, idx
+            for idx, point in enumerate(adj_plane):
+                if point not in plane:
+                    outer_point, outer_point_idx = point, idx
+                    break
             if outer_point_idx == 0:
                 base_points = [adj_plane[1], adj_plane[2]]
             elif outer_point_idx == 1:
@@ -174,18 +191,27 @@ class QuickHull3D:
                 base_points = [adj_plane[0], adj_plane[1]]
             for np_idx, new_plane in enumerate(new_planes):
                 if base_points[0] in new_plane and base_points[1] in new_plane:
-                    fixed_plane_1 = (outer_point, base_points[0], new_hull_pt_idx)
-                    fixed_plane_2 = (new_hull_pt_idx, base_points[1], outer_point)
-                    self.delete_internal_points([fixed_plane_1,
-                                                 fixed_plane_2,
+                    fixed_planes = [(outer_point, base_points[0], new_hull_pt_idx),
+                                    (base_points[1], outer_point, new_hull_pt_idx)]
+
+                    self.delete_internal_points([fixed_planes[0],
+                                                 fixed_planes[1],
                                                  self.flip_triangle(new_plane),
                                                  self.flip_triangle(adj_plane)])
-                    new_planes[np_idx] = fixed_plane_1
-                    new_planes.append(fixed_plane_2)
-                    self._hull_planes.remove(adj_plane)
+                    new_planes += fixed_planes
+                    new_planes.pop(np_idx)
+                    self._hull_planes += fixed_planes
+
+                    fixed_planes_neighbors = {
+                        fixed_planes[0]: (self._plane_neighbors[adj_plane][], new_planes[1], fixed_planes[1]),
+                        fixed_planes[1]: (self._plane_neighbors[adj_plane][], fixed_planes[0], new_planes[2])}
+
+                    # TODO - finish updating the neighbors here
+
+                    adj_plane, adj_plane_neighbors = self.remove_plane(new_plane)
+
                     print(f'deleting plane: {adj_plane}')
-                    new_planes = self.re_edge_adjacent_faces(adj_plane, new_planes, new_hull_pt_idx)
-        return new_planes
+                    self.re_edge_adjacent_faces(adj_plane, adj_plane_neighbors, new_planes, new_hull_pt_idx)
 
     def plot_hull(self):
         fig = plt.figure(figsize=plt.figaspect(1))
