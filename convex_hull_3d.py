@@ -1,6 +1,7 @@
 from typing import List, Union, Dict
 import trimesh
 import os
+import copy
 
 import numpy as np
 from matplotlib import pyplot as plt
@@ -44,11 +45,13 @@ def load_space_sample(file_path):
     return vertices
 
 class QuickHull3D:
-    def __init__(self, points: np.array):
+    def __init__(self, points: np.array, log: bool = False):
         self._points = points
         self._hull_vertices = None
         self._hull_planes = None
         self._plane_neighbors = {}
+        self._plane_queue = []
+        self._log = log
 
     def initial_tetrahedron(self):
         hull_idxs = [self._points[:, 0].argmin(),
@@ -88,8 +91,8 @@ class QuickHull3D:
             raise TypeError(f"illegal type for plane: {type(plane)} "
                             f"plane must be passed as either an integer (index) or tuple (plane).")
         neighbors = self._plane_neighbors.pop(plane)
-        print(f'removing plane: {plane}')
-        return plane, neighbors
+        self.log(f'removing plane: {plane}')
+        return neighbors
 
     def add_planes(self, planes: List[tuple], planes_neighbors: Dict[tuple, List[tuple]]):
         self._hull_planes += planes
@@ -105,37 +108,33 @@ class QuickHull3D:
             self.initial_triangle()
         if initial_shape == 'tetrahedron':
             self.initial_tetrahedron()
-        while True:
-            start_plane_index = 0
-            for i, plane in enumerate(self._hull_planes[start_plane_index:]):
-                new_planes_found = False
-                new_pnt_idx = self.find_most_dist_point_index(np.array([self._hull_vertices[plane[0], :],
-                                                                        self._hull_vertices[plane[1], :],
-                                                                        self._hull_vertices[plane[2], :]]))
-                if new_pnt_idx is not None:
-                    self._hull_vertices = np.vstack([self._hull_vertices, self._points[new_pnt_idx, :]])
-                    self._points = np.delete(self._points, new_pnt_idx, 0)
-                    new_hull_pt_idx = len(self._hull_vertices[:, 0]) - 1
-                    new_planes = [(plane[0], plane[1], new_hull_pt_idx),
-                                  (plane[1], plane[2], new_hull_pt_idx),
-                                  (plane[2], plane[0], new_hull_pt_idx)]
+        self._plane_queue = copy.deepcopy(self._hull_planes)
+        while self._plane_queue:
+            plane = self._plane_queue.pop(0)
+            while plane not in self._plane_neighbors:
+                plane = self._plane_queue.pop(0)
+            new_pnt_idx = self.find_most_dist_point_index(np.array([self._hull_vertices[plane[0], :],
+                                                                    self._hull_vertices[plane[1], :],
+                                                                    self._hull_vertices[plane[2], :]]))
+            if new_pnt_idx is not None:
+                self._hull_vertices = np.vstack([self._hull_vertices, self._points[new_pnt_idx, :]])
+                self._points = np.delete(self._points, new_pnt_idx, 0)
+                new_hull_pt_idx = len(self._hull_vertices[:, 0]) - 1
+                new_planes = [(plane[0], plane[1], new_hull_pt_idx),
+                              (plane[1], plane[2], new_hull_pt_idx),
+                              (plane[2], plane[0], new_hull_pt_idx)]
 
-                    new_planes_neighbors = {new_planes[0]: [self._plane_neighbors[plane][0], new_planes[1], new_planes[2]],
-                                            new_planes[1]: [self._plane_neighbors[plane][1], new_planes[2], new_planes[0]],
-                                            new_planes[2]: [self._plane_neighbors[plane][2], new_planes[0], new_planes[1]]}
+                new_planes_neighbors = {new_planes[0]: [self._plane_neighbors[plane][0], new_planes[1], new_planes[2]],
+                                        new_planes[1]: [self._plane_neighbors[plane][1], new_planes[2], new_planes[0]],
+                                        new_planes[2]: [self._plane_neighbors[plane][2], new_planes[0], new_planes[1]]}
 
-                    self.delete_internal_points(new_planes + [self.flip_triangle(plane)])
-                    plane, neighbors = self.remove_plane(i)
-                    self.add_planes(new_planes, new_planes_neighbors)
+                self.delete_internal_points(new_planes + [self.flip_triangle(plane)])
+                neighbors = self.remove_plane(plane)
+                self.add_planes(new_planes, new_planes_neighbors)
 
-                    self.re_edge_adjacent_faces(plane, neighbors, new_planes, new_hull_pt_idx)
-
-                    self.plot_hull()
-                    new_planes_found = True
-                    break
-                start_plane_index += 1
-            if not new_planes_found:
-                break
+                new_planes = self.re_edge_adjacent_faces(plane, neighbors, new_planes, new_hull_pt_idx)
+                self._plane_queue += new_planes
+                self.plot_hull()
 
     def is_above_plane(self, plane: tuple, point: np.array):
         vec_a = self._hull_vertices[plane[1], :] - self._hull_vertices[plane[0], :]
@@ -174,12 +173,15 @@ class QuickHull3D:
         for pt_idx in internal_points_idxs:
             self._points = np.delete(self._points, pt_idx, 0)
 
-    def re_edge_adjacent_faces(self, plane: tuple, plane_neighbors: List[tuple], new_planes: List[tuple], new_hull_pt_idx: int):
-        """ recursive function that re-edges all faces that are adjacent to a certain face and are below a given point """
+    def re_edge_adjacent_faces(self, plane: tuple, plane_neighbors: List[tuple], new_planes: List[tuple],
+                               new_hull_pt_idx: int) -> List[tuple]:
+        """
+        recursive function that re-edges all faces that are adjacent to a certain face and are below a given point
+        """
         for adj_plane_idx, adj_plane in enumerate(plane_neighbors):
             if not self.is_above_plane(adj_plane, self._hull_vertices[-1, :]):
                 continue
-            print(f'plane of origin:{plane},   {new_hull_pt_idx} is above {adj_plane}')
+            self.log(f'plane of origin:{plane},   {new_hull_pt_idx} is above {adj_plane}')
             if adj_plane_idx < 2:
                 base_points = [plane[adj_plane_idx], plane[adj_plane_idx+1]]
             else:
@@ -213,18 +215,20 @@ class QuickHull3D:
                     new_planes = new_planes[:np_idx] + fixed_planes + new_planes[np_idx+1:]
 
                     self.remove_plane(new_plane)
-                    adj_plane, adj_plane_neighbors = self.remove_plane(adj_plane)
+                    adj_plane_neighbors = self.remove_plane(adj_plane)
                     self.add_planes(fixed_planes, fixed_planes_neighbors)
 
                     new_planes = self.re_edge_adjacent_faces(adj_plane, adj_plane_neighbors, new_planes, new_hull_pt_idx)
         return new_planes
 
-    def plot_hull(self):
+    def plot_hull(self, orig_points: np.array = None):
         show_indexes = False
         marker_size = 1
         fig = plt.figure(figsize=plt.figaspect(1))
         ax = fig.add_subplot(projection='3d')
         ax.view_init(elev=270, azim=90)
+        if orig_points is not None:
+            ax.scatter(orig_points[:, 0], orig_points[:, 1], orig_points[:, 2], color='blue', s=marker_size)
         ax.scatter(self._points[:, 0], self._points[:, 1], self._points[:, 2], color='blue', s=marker_size)
         ax.scatter(self._hull_vertices[:, 0], self._hull_vertices[:, 1], self._hull_vertices[:, 2], color='red', s=marker_size)
         if show_indexes:
@@ -237,6 +241,10 @@ class QuickHull3D:
         figManager = plt.get_current_fig_manager()
         figManager.window.showMaximized()
         plt.show()
+
+    def log(self, message):
+        if self._log:
+            print(message)
 
     @staticmethod
     def flip_triangle(triangle: tuple):
@@ -262,5 +270,6 @@ pts = load_space_sample(file_path)
 # pts = test_space_sampling()
 solver = QuickHull3D(pts)
 solver.find_hull(initial_shape='tetrahedron')
+# solver.plot_hull(pts)
 temp = 1
 
