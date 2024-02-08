@@ -1,57 +1,23 @@
-from typing import List, Union, Dict
-import trimesh
-import os
+from typing import List, Union, Dict, Optional
 import copy
 
 import numpy as np
 from matplotlib import pyplot as plt
 
 
-def test_space_sampling():
-    return np.array([[-1, 0, 0],
-                     [-0.5, 0, 0],
-                     [0, 0, 0],
-                     [0.5, 0, 0],
-                     [1, 0, 0],
-                     [0, -1, 0],
-                     [0, -0.5, 0],
-                     [0, 0.5, 0],
-                     [0, 1, 0],
-                     [0, 0, -1],
-                     [0, 0, -0.5],
-                     [0, 0, 0.5],
-                     [0, 0, 1],
-                     [0.8, 0.8, 0.8],
-                     [0.8, 0.8, -0.8],
-                     [0.8, -0.8, 0.8],
-                     [-0.8, 0.8, 0.8],
-                     [-0.8, 0.8, -0.8],
-                     [-0.8, -0.8, 0.8],
-                     [0.8, -0.8, -0.8],
-                     [-0.8, -0.8, -0.8]
-                     ])
-
-
-def random_space_sampling():
-    pts = np.random.rand(200, 3)
-    pts = pts - 0.5
-    pts = pts * 2
-    return pts
-
-
-def load_space_sample(file_path):
-    mesh = trimesh.load(file_path)
-    vertices = mesh.vertices
-    return vertices
-
 class QuickHull3D:
-    def __init__(self, points: np.array, log: bool = False):
+    def __init__(self, points: np.array, log: bool = False, plot_params: Dict = {}):
         self._points = points
         self._hull_vertices = None
         self._hull_planes = None
         self._plane_neighbors = {}
         self._plane_queue = []
         self._log = log
+        self._plot_params = {'show_indexes': False,
+                             'marker_size': 10,
+                             'elev': 45,
+                             'azim': 45}
+        self._plot_params.update(plot_params)
 
     def initial_tetrahedron(self):
         hull_idxs = [self._points[:, 0].argmin(),
@@ -69,7 +35,7 @@ class QuickHull3D:
                                  (0, 1, 3): [(0, 2, 1), (1, 2, 3), (0, 3, 2)],
                                  (0, 3, 2): [(0, 1, 3), (1, 2, 3), (0, 2, 1)],
                                  (1, 2, 3): [(0, 2, 1), (0, 3, 2), (0, 1, 3)]}
-        self.delete_internal_points(self._hull_planes)
+        self.delete_internal_points_new(self._hull_planes)
 
     def initial_triangle(self):
         hull_idxs = [self._points[:, 0].argmin(),
@@ -128,13 +94,13 @@ class QuickHull3D:
                                         new_planes[1]: [self._plane_neighbors[plane][1], new_planes[2], new_planes[0]],
                                         new_planes[2]: [self._plane_neighbors[plane][2], new_planes[0], new_planes[1]]}
 
-                self.delete_internal_points(new_planes + [self.flip_triangle(plane)])
+                self.delete_internal_points_new(new_planes + [self.flip_triangle(plane)])
                 neighbors = self.remove_plane(plane)
                 self.add_planes(new_planes, new_planes_neighbors)
 
                 new_planes = self.re_edge_adjacent_faces(plane, neighbors, new_planes, new_hull_pt_idx)
                 self._plane_queue += new_planes
-                self.plot_hull()
+                # self.plot_hull()
 
     def is_above_plane(self, plane: tuple, point: np.array):
         vec_a = self._hull_vertices[plane[1], :] - self._hull_vertices[plane[0], :]
@@ -142,18 +108,15 @@ class QuickHull3D:
         vec_p = point - self._hull_vertices[plane[2], :]
         return np.dot(vec_p, np.cross(vec_a, vec_b)) > 0
 
-    def find_most_dist_point_index(self, surf_pts: np.array) -> int:
+    def find_most_dist_point_index(self, surf_pts: np.array) -> Optional[int]:
+        if self._points.size == 0:
+            return None
         plane_normal = np.cross((surf_pts[1] - surf_pts[0]), (surf_pts[2] - surf_pts[1]))
         plane_normal = plane_normal / np.linalg.norm(plane_normal)
-        max_dist = 0
-        point_index = None
-        for index, pnt in enumerate(self._points):
-            vec_to_pnt = pnt - surf_pts[0, :]
-            dist_to_plane = np.dot(plane_normal, vec_to_pnt)
-            if dist_to_plane > max_dist:
-                point_index = index
-                max_dist = dist_to_plane
-        return point_index
+        vecs_to_pnts = self._points - surf_pts[0, :]
+        dists_to_planes = np.dot(vecs_to_pnts, plane_normal)
+        point_index = dists_to_planes.argmax()
+        return point_index if dists_to_planes[point_index] > 0 else None
 
     def internal_points_to_3d_polygon(self, surface_triangles: List) -> List[int]:
         internal_idxs = set(range(len(self._points)))
@@ -164,6 +127,7 @@ class QuickHull3D:
                     idxs_to_remove.add(idx)
             for idx in idxs_to_remove:
                 internal_idxs.remove(idx)
+        print(internal_idxs)
         return list(internal_idxs)
 
     def delete_internal_points(self, polygon_planes: List[tuple]) -> np.array:
@@ -172,6 +136,17 @@ class QuickHull3D:
         internal_points_idxs.reverse()
         for pt_idx in internal_points_idxs:
             self._points = np.delete(self._points, pt_idx, 0)
+
+    def delete_internal_points_new(self, polygon_planes: List[tuple]) -> np.array:
+        """ note - the polygon in polygon_planes must be convex """
+        planes_removal_vec = np.full(self._points.shape[0], False, dtype=bool)
+        for plane in polygon_planes:
+            plane_normal = np.cross((self._hull_vertices[plane[1], :] - self._hull_vertices[plane[0], :]),
+                                    (self._hull_vertices[plane[2], :] - self._hull_vertices[plane[1], :]))
+            vecs_to_pnts = self._points - self._hull_vertices[plane[0], :]
+            dists_to_planes = np.dot(vecs_to_pnts, plane_normal)
+            planes_removal_vec = np.logical_or(dists_to_planes > 0, planes_removal_vec)
+        self._points = self._points[planes_removal_vec]
 
     def re_edge_adjacent_faces(self, plane: tuple, plane_neighbors: List[tuple], new_planes: List[tuple],
                                new_hull_pt_idx: int) -> List[tuple]:
@@ -207,7 +182,7 @@ class QuickHull3D:
                                           new_planes[(np_idx + 1) % len(new_planes)],
                                           fixed_planes[0]]}
 
-                    self.delete_internal_points([fixed_planes[0],
+                    self.delete_internal_points_new([fixed_planes[0],
                                                  fixed_planes[1],
                                                  self.flip_triangle(new_plane),
                                                  self.flip_triangle(adj_plane)])
@@ -222,11 +197,23 @@ class QuickHull3D:
         return new_planes
 
     def plot_hull(self, orig_points: np.array = None):
-        show_indexes = False
-        marker_size = 1
+        show_indexes = self._plot_params['show_indexes']
+        marker_size = self._plot_params['marker_size']
+        elev = self._plot_params['elev']
+        azim = self._plot_params['azim']
+
         fig = plt.figure(figsize=plt.figaspect(1))
         ax = fig.add_subplot(projection='3d')
-        ax.view_init(elev=270, azim=90)
+        ax.view_init(elev=elev, azim=azim)
+        ax.axis('off')
+        ax.set_facecolor('none')
+        ax.grid(False)
+        ax.set_xticks([])
+        ax.set_yticks([])
+        ax.set_zticks([])
+        ax.set_xticklabels([])
+        ax.set_yticklabels([])
+        ax.set_zticklabels([])
         if orig_points is not None:
             ax.scatter(orig_points[:, 0], orig_points[:, 1], orig_points[:, 2], color='blue', s=marker_size)
         ax.scatter(self._points[:, 0], self._points[:, 1], self._points[:, 2], color='blue', s=marker_size)
@@ -236,7 +223,7 @@ class QuickHull3D:
                 ax.text(point[0] + 0.1, point[1] + 0.1, point[2] + 0.1, str(int(i)), color='black')
         if self._hull_vertices is not None:
             ax.plot_trisurf(self._hull_vertices[:, 0], self._hull_vertices[:, 1], self._hull_vertices[:, 2],
-                            triangles=self._hull_planes, edgecolor=[[1, 0, 0]], linewidth=1.0, alpha=0.3, shade=False)
+                            triangles=self._hull_planes, edgecolor=[[1, 0, 0]], linewidth=1, alpha=0.3, shade=False)
         fig.tight_layout()
         figManager = plt.get_current_fig_manager()
         figManager.window.showMaximized()
@@ -264,12 +251,4 @@ class QuickHull3D:
         return [plane for plane, shared_points in adjacent_planes.items() if shared_points == 2]
 
 
-# -------------------------------------- main ---------------------------------------- #
-file_path = os.path.join(os.getcwd(), "quick_hull_3d\\bunny\\reconstruction\\bun_zipper_res2.ply")
-pts = load_space_sample(file_path)
-# pts = test_space_sampling()
-solver = QuickHull3D(pts)
-solver.find_hull(initial_shape='tetrahedron')
-# solver.plot_hull(pts)
-temp = 1
 
